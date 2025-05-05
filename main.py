@@ -1,7 +1,11 @@
 import asyncio
-import aiohttp  # pip install aiohttp aiodns
 from itertools import chain
+
+import aiohttp  # pip install aiohttp aiodns
+import numpy as np
 import pandas as pd
+import streamlit as st
+from functools import cache
 
 
 async def fetch_wikidata(session: aiohttp.ClientSession, id_=None, query=None) -> dict:
@@ -56,11 +60,10 @@ async def property_value(property_id: str, claims: dict) -> list:
 
         values.extend(ids)
 
-        # print(f'{values=}')
-
     return values
 
 
+@cache
 async def main(query, threshold=5):
     # Asynchronous context manager.  Prefer this rather
     # than using a different session for each GET request
@@ -155,9 +158,22 @@ def data_to_df(data: dict):
     return df
 
 
+async def app():
+    """ """
+    st.set_page_config(
+        page_title="Brand origin",
+        page_icon=None,
+        layout="wide",
+        initial_sidebar_state="auto",
+        menu_items=None,
+    )
+    st.title("Brand origin")
+    brand = st.text_input("Please input the brand to search", value=None)
+    if brand:
+        data = await main(brand)
+        df = data_to_df(data)
+        st.dataframe(df, use_container_width=True)
+
+
 if __name__ == "__main__":
-    query = input("query: ")
-    data = asyncio.run(main(query))
-    # print(f'{data=}')
-    df = data_to_df(data).T
-    print(df)
+    asyncio.run(app())
