@@ -2,24 +2,23 @@ import asyncio
 from itertools import chain
 
 import aiohttp  # pip install aiohttp aiodns
-import numpy as np
 import pandas as pd
 import streamlit as st
-from functools import cache
 
 
 async def fetch_wikidata(session: aiohttp.ClientSession, id_=None, query=None) -> dict:
     url = "https://www.wikidata.org/w/api.php/"
     data = {}
-    if id_:
+
+    if id_:  # 'entity / property'
         params = {
             "action": "wbgetentities",
-            "ids": id_,
+            "ids": "|".join(id_),
             "format": "json",
             "languages": "en",
         }
 
-    if query:
+    if query:  # 'natural language query'
         params: dict = {
             "action": "wbsearchentities",
             "format": "json",
@@ -31,40 +30,43 @@ async def fetch_wikidata(session: aiohttp.ClientSession, id_=None, query=None) -
     # Note that this may raise an exception for non-2xx responses
     # You can either handle that here, or pass the exception through
     data = await resp.json()
-    return data
+
+    return data["entities"] if id_ else data["search"]
 
 
 async def property_value(property_id: str, claims: dict) -> list:
     values = []
     ids = []
-    # print(claims)
-    async with aiohttp.ClientSession() as session:
-        for i, v in enumerate(claims[property_id]):
-            if prop_value := v["mainsnak"].get("datavalue"):
-                if isinstance(value := prop_value.get("value"), str):
-                    values.append(value)
-                elif wiki_id := value.get("id"):
-                    ids.append(wiki_id)
-                else:
-                    values.append(value.get("time", value.get("text")))
+    # Parse data
+    for i, v in enumerate(claims[property_id]):
+        if prop_value := v["mainsnak"].get("datavalue"):
+            if isinstance(value := prop_value.get("value"), str):
+                values.append(value)
+            elif wiki_id := value.get("id"):
+                ids.append(wiki_id)
+            else:
+                values.append(value.get("time", value.get("text")))
+    # Get labels of entities if needed
+    if len(ids) > 0:
+        async with aiohttp.ClientSession() as session:
+            id_tasks = [fetch_wikidata(session=session, id_=ids)]
+            ids = await asyncio.gather(*id_tasks, return_exceptions=True)
+            # ids = chain(ids)
 
-        id_tasks = [fetch_wikidata(session=session, id_=id_) for id_ in ids]
-        ids = await asyncio.gather(*id_tasks, return_exceptions=True)
-        # ids = chain(ids)
-        ids = [
-            labels.get("value")
-            for d in ids
-            for prop_id in d["entities"].values()
-            for labels in prop_id.get("labels").values()
-        ]
+            ids = [
+                labels.get("value")
+                # prop_id.keys()
+                for d in ids
+                for prop_id in d.values()
+                for labels in prop_id.get("labels").values()
+            ]
 
-        values.extend(ids)
+            values.extend(ids)
 
-    return values
+    return property_id, values
 
 
-@cache
-async def main(query, threshold=5):
+async def main(query, threshold=4):
     # Asynchronous context manager.  Prefer this rather
     # than using a different session for each GET request
 
@@ -91,62 +93,51 @@ async def main(query, threshold=5):
         "P155": "Follows",
         "P156": "Followed by",
     }
+
+    # Natural language query
     async with aiohttp.ClientSession() as session:
         search_tasks = [fetch_wikidata(session=session, query=query)]
         # asyncio.gather() will wait on the entire task set to be
         # completed.  If you want to process results greedily as they come in,
         # loop over asyncio.as_completed()
         search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+
+    # get label, description
     data = {
         d["id"]: {"label": d["label"], "description": d.get("description", "")}
-        for elem in search_results
-        for d in elem["search"]
+        for d in chain(*search_results)
     }
-    claim_entities: list[str] = [
-        d["id"] for elem in search_results for d in elem["search"]
-    ]
+
+    # claim entities
+    claim_entities: list[str] = [d["id"] for d in chain(*search_results)]
 
     async with aiohttp.ClientSession() as session:
         id_tasks = [
             fetch_wikidata(
                 session=session,
-                id_=claim_entity,
+                id_=claim_entities,
             )
-            for claim_entity in claim_entities
         ]
         claim_results = await asyncio.gather(*id_tasks, return_exceptions=True)
 
-    for claim_result in claim_results:
-        wikidata_id = list(claim_result["entities"].keys())[0]
-        wikidata_id_content = claim_result["entities"][wikidata_id]
+    # parse data
+    for entity, v in claim_results[0].items():
         if (
-            len(
-                properties := set(valid_properties.keys())
-                & set(wikidata_id_content["claims"].keys())
-            )
+            len(properties := set(valid_properties.keys()) & set(v["claims"].keys()))
             < threshold
         ):
-            del data[wikidata_id]
+            del data[entity]
             continue
-        data[wikidata_id]["aliases"]: list = list(
-            set(
-                alias["value"]
-                for alias in chain.from_iterable(
-                    wikidata_id_content["aliases"].values()
-                )
-            )
+
+        data[entity]["aliases"]: list = list(
+            set(alias["value"] for alias in chain.from_iterable(v["aliases"].values()))
         )
+        property_tasks = [property_value(p, v["claims"]) for p in properties]
 
-        for p in properties:
-            property_tasks = []
-            property_tasks.append(property_value(p, wikidata_id_content["claims"]))
-            data[wikidata_id][valid_properties[p]] = await asyncio.gather(
-                *property_tasks, return_exceptions=True
-            )
+        req = await asyncio.gather(*property_tasks, return_exceptions=True)
 
-            data[wikidata_id][valid_properties[p]] = list(
-                chain(*data[wikidata_id][valid_properties[p]])
-            )
+        for prop, value in req:
+            data[entity][valid_properties[prop]] = value
     return data
 
 
@@ -167,8 +158,12 @@ async def app():
         initial_sidebar_state="auto",
         menu_items=None,
     )
+
     st.title("Brand origin")
-    brand = st.text_input("Please input the brand to search", value=None)
+    brand = st.text_input(
+        "Please input the name of the brand to retrieve", value="streamlit"
+    )
+    # lang =
     if brand:
         data = await main(brand)
         df = data_to_df(data)
