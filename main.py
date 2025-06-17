@@ -7,9 +7,10 @@ import streamlit as st
 
 
 async def fetch_wikidata(session: aiohttp.ClientSession, id_=None, query=None) -> dict:
+    # print(f"{id_=}", f"{query=}")
     url = "https://www.wikidata.org/w/api.php/"
     data = {}
-
+    params = dict()
     if id_:  # 'entity / property'
         params = {
             "action": "wbgetentities",
@@ -110,7 +111,8 @@ async def main(query, threshold=4):
 
     # claim entities
     claim_entities: list[str] = [d["id"] for d in chain(*search_results)]
-
+    if len(claim_entities) < 1:
+        raise NameError(f"No results found for {query}")
     async with aiohttp.ClientSession() as session:
         id_tasks = [
             fetch_wikidata(
@@ -118,7 +120,7 @@ async def main(query, threshold=4):
                 id_=claim_entities,
             )
         ]
-        claim_results = await asyncio.gather(*id_tasks, return_exceptions=True)
+        claim_results = await asyncio.gather(*id_tasks, return_exceptions=False)
 
     # parse data
     for entity, v in claim_results[0].items():
@@ -165,9 +167,13 @@ async def app():
     )
     # lang =
     if brand:
-        data = await main(brand)
-        df = data_to_df(data)
-        st.dataframe(df, use_container_width=True)
+        try:
+            data = await main(brand)
+            df = data_to_df(data)
+            st.dataframe(df, use_container_width=True)
+        except NameError as e:
+            st.error(e)
+            st.error("Please try with another query.")
 
 
 if __name__ == "__main__":
